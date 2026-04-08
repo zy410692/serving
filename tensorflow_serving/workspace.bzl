@@ -143,6 +143,6 @@ def tf_serving_workspace():
         commit = "b7b1371294b4bdfc8d85e49236ebced114bc1d8f",  # boost-1.75.0
         build_file = "//third_party/boost:BUILD",
         init_submodules = True,
-        recursive_init_submodules = True,
+        recursive_init_submodules = False,  # Disabled to avoid 600+ second timeout during ARM64 builds
         remote = "https://github.com/boostorg/boost",
     )

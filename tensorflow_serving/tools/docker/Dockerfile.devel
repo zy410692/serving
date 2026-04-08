@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-FROM ubuntu:22.04@sha256:eb29ed27b0821dca09c2e28b39135e185fc1302036427d5f4d70a41ce8fd7659 as base_build
+FROM arm64v8/ubuntu as base_build
 
 
 ARG TF_SERVING_VERSION_GIT_BRANCH=master
@@ -33,7 +33,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpng-dev \
         libtool \
         libzmq3-dev \
-        mlocate \
         openjdk-11-jdk \
         openjdk-11-jre-headless \
         pkg-config \
@@ -49,23 +48,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install python 3.10 (Native on Ubuntu 22.04).
+# Install python packages (use system default python3)
 RUN apt-get update && apt-get install -y \
-    python3.10 python3.10-dev python3-pip python3.10-venv && \
-    rm -rf /var/lib/apt/lists/* && \
-    python3.10 -m pip install pip --upgrade && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 0
+    python3-dev python3-pip python3-venv && \
+    rm -rf /var/lib/apt/lists/*
 
-
-# Make python3.10 the default python version
-# If updating default python version, also update version in the WORKSPACE file.
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 0
-
-RUN curl -fSsL -O https://bootstrap.pypa.io/get-pip.py && \
-    python3 get-pip.py && \
-    rm get-pip.py
-
-RUN pip3 --no-cache-dir install \
+RUN pip3 --no-cache-dir install --break-system-packages \
     future>=0.17.1 \
     grpcio \
     h5py \
@@ -78,33 +66,47 @@ RUN pip3 --no-cache-dir install \
     --ignore-installed setuptools \
     --ignore-installed six>=1.12.0
 
+# Configure git for extremely slow/large operations (boost library download)
+# Set timeouts to 20 minutes (1200 seconds) to handle boost's recursive submodule updates
+RUN git config --global http.timeout 1200 && \
+    git config --global core.compression 0 && \
+    git config --global http.postBuffer 524288000 && \
+    git config --global core.packedRefsTimeout 1200
+
 # Set up Bazel
 ENV BAZEL_VERSION 7.4.1
 WORKDIR /
 RUN mkdir /bazel && \
     cd /bazel && \
-    curl -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/57.0.2987.133 Safari/537.36" -fSsL -O https://github.com/bazelbuild/bazel/releases/download/$BAZEL_VERSION/bazel-$BAZEL_VERSION-installer-linux-x86_64.sh && \
-    curl -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/57.0.2987.133 Safari/537.36" -fSsL -o /bazel/LICENSE.txt https://raw.githubusercontent.com/bazelbuild/bazel/master/LICENSE && \
-    chmod +x bazel-*.sh && \
-    ./bazel-$BAZEL_VERSION-installer-linux-x86_64.sh && \
+    ARCH=$(uname -m | sed 's/x86_64/x86_64/g' | sed 's/aarch64/arm64/g') && \
+    curl -H "User-Agent: Mozilla/5.0" -fSsL -O https://github.com/bazelbuild/bazel/releases/download/$BAZEL_VERSION/bazel-$BAZEL_VERSION-linux-${ARCH} && \
+    mv bazel-$BAZEL_VERSION-linux-${ARCH} /usr/local/bin/bazel && \
+    chmod +x /usr/local/bin/bazel && \
+    curl -H "User-Agent: Mozilla/5.0" -fSsL -o /bazel/LICENSE.txt https://raw.githubusercontent.com/bazelbuild/bazel/master/LICENSE && \
     cd / && \
-    rm -f /bazel/bazel-$BAZEL_VERSION-installer-linux-x86_64.sh
+    rm -rf /bazel
 
-# Download TF Serving sources (optionally at specific commit).
+# Copy local TF Serving sources (with workspace.bzl optimization for ARM64)
+COPY . /tensorflow-serving/
 WORKDIR /tensorflow-serving
-RUN curl -sSL --retry 5 https://github.com/tensorflow/serving/tarball/${TF_SERVING_VERSION_GIT_COMMIT} | tar --strip-components=1 -xzf -
 
 FROM base_build as binary_build
 # Build, and install TensorFlow Serving
 ARG TF_SERVING_BUILD_OPTIONS="--config=release"
 RUN echo "Building with build options: ${TF_SERVING_BUILD_OPTIONS}"
-ARG TF_SERVING_BAZEL_OPTIONS=""
+ARG TF_SERVING_BAZEL_OPTIONS="--cpu=aarch64 --copt=-Qunused-arguments --cxxopt=-Qunused-arguments"
 RUN echo "Building with Bazel options: ${TF_SERVING_BAZEL_OPTIONS}"
+
+# Clear Bazel cache to avoid stale state and increase Bazel's fetch timeout
+RUN rm -rf /root/.cache/bazel && \
+    bazel clean --expunge 2>/dev/null || true
 
 RUN bazel build --color=yes --curses=yes \
     ${TF_SERVING_BAZEL_OPTIONS} \
     --verbose_failures \
     --output_filter=DONT_MATCH_ANYTHING \
+    --http_timeout_scaling=50.0 \
+    --spawn_strategy=standalone \
     ${TF_SERVING_BUILD_OPTIONS} \
     tensorflow_serving/model_servers:tensorflow_model_server && \
     cp bazel-bin/tensorflow_serving/model_servers/tensorflow_model_server \
@@ -119,7 +121,7 @@ RUN bazel build --color=yes --curses=yes \
     tensorflow_serving/tools/pip_package:build_pip_package && \
     bazel-bin/tensorflow_serving/tools/pip_package/build_pip_package \
     /tmp/pip && \
-    pip --no-cache-dir install --upgrade \
+    pip --no-cache-dir install --break-system-packages --upgrade \
     /tmp/pip/tensorflow_serving_api-*.whl && \
     rm -rf /tmp/pip
 
