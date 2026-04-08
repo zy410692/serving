@@ -496,74 +496,201 @@ Timed out
 
 ---
 
-### 编译运行 #8 (2026-04-09) - 极限 HTTP 超时缩放 (50.0倍) ❌ **失败**
-**开始时间:** 2026-04-09 (T+768 秒后)
-**失败时间:** T+787秒（约13分钟）
+### 编译运行 #6 (2026-04-09) - 禁用递归子模块（被取消）
+**开始时间:** 2026-04-09 (T+753.5 秒后)
+**结束时间:** 未完成 - 上下文被取消
 
-**状态:** ❌ **编译失败 - 仍然超时！**
+**状态:** ⚠️ **编译被中止 - 用户手动停止**
 
-**失败分析:**
-- 超时时间：T+787 秒（比之前的 T+753-768s 更晚）
-- boost 更新耗时：约 600 秒（与之前相同）
-- http_timeout_scaling=50.0 仍然不足
-- 结论：**问题不是简单的超时数字，而是 Bazel 的 git_repository 对 boost 的处理方式本身**
+**最后输出:**
+```
+boost 递归初始化耗时：122 秒（在 T+279 秒时）
+最后消息：ERROR: failed to solve: Canceled: context canceled
+```
 
-**所有编译失败汇总:**
-| 编译 | 关键改进 | 超时参数 | 失败时间 | boost耗时 |
-|------|--------|--------|---------|---------|
-| #5 | http_timeout_scaling | 5.0x | T+753s | 602s |
-| #7 | recursive_init_submodules=False | 5.0x | T+768s | 602s |
-| #8 | recursive_init_submodules=False + 50.0x | 50.0x | T+787s | 600s |
-
-**关键发现:**
-- boost 子模块更新耗时始终在 **600-602 秒**
-- 增加 HTTP 超时倍数不能根本解决问题
-- **根本原因：Bazel 的 git_repository 规则不适合处理大型 git 仓库的递归初始化**
-- 即使不递归初始化，boost 的第一层子模块初始化仍然需要 600 秒
+**原因:** 用户意识到即使禁用递归初始化，boost 仍然超时，因此停止了这次编译，改为尝试 #7 的新方法（COPY 本地源码）。
 
 ---
 
-## 推荐解决方案：完全绕过 Bazel 的 git_repository
+### 编译运行 #7 (2026-04-09) - Dockerfile COPY + 递归禁用 ❌ **失败**
+**开始时间:** 2026-04-09 (T+279 秒后)
+**失败时间:** T+767.729秒（约12分钟）
 
-**问题的本质:**
-- Bazel 的 `new_git_repository` 规则依赖于 git 子模块初始化
-- boost 仓库的子模块初始化本质上很慢（即使非递归）
-- 无法通过调整超时参数来根本解决
+**状态:** ❌ **编译失败 - boost 仍然超时**
 
-**方案 A: 使用预构建的 Boost 二进制包（最简单）** ⭐ **推荐**
-- 使用系统 apt 安装的 boost-all-dev：`apt-get install -y libboost-all-dev`
-- 或从 https://packages.ubuntu.com 下载预编译的 ARM64 boost 包
-- 修改 BUILD 文件以使用系统 boost 而不是从源码编译
-- 预期效果：完全避免 git 下载和编译，节省 10+ 分钟编译时间
+**失败原因:**
+- boost 递归子模块更新超时（即使禁用了递归初始化）
+- 总编译时间：767.729 秒
+- **问题仍未解决：即使使用本地 COPY 源码，boost 仍然在 600+ 秒时失败**
 
-**方案 B: 在 Docker 镜像中预先完全缓存 boost 源码**
-```dockerfile
-# 在 base_build 阶段预先下载并缓存 boost（只需一次）
-RUN mkdir -p /boost-src && \
-    cd /boost-src && \
-    git clone --depth 1 --single-branch https://github.com/boostorg/boost.git . && \
-    # 修改 WORKSPACE 以指向本地 /boost-src
+---
+
+### 编译运行 #8 (2026-04-09) - 极限 HTTP 超时缩放 (50.0倍) ❌ **失败**
+**开始时间:** 2026-04-09 (T+767.729 秒后)
+**失败时间:** T+786.717秒（约13分钟）
+
+**状态:** ❌ **编译失败 - 50.0x 超时仍不足！**
+
+**失败分析:**
+- http_timeout_scaling: 50.0x（50 倍缩放 = 750+ 秒超时）
+- boost 更新耗时：约 600 秒
+- 总编译时间：786.717 秒
+- **结论：即使增加到 50 倍超时，问题仍然存在**
+
+---
+
+## 所有 8 次编译的最终失败统计
+
+| 编译 | 失败原因 | 失败时间 | boost 耗时 | HTTP 超时 |
+|------|--------|---------|----------|---------|
+| #1 | x86 指令集不支持 | T+~610s | N/A | 无 |
+| #2 | boost git 超时 | T+760s | 600s | 默认 |
+| #3 | git http.timeout 600s 不足 | T+753s | 600s | 600s |
+| #4 | git http.timeout 1200s 不足 | T+769s | 602s | 1200s |
+| #5 | http_timeout_scaling 5.0x 不足 | T+753.5s | 602s | 5.0x |
+| #6 | 被中止（用户停止） | T+279s | 122s | 5.0x |
+| #7 | boost 超时（COPY 方法） | T+767.729s | 600s+ | 5.0x |
+| #8 | http_timeout_scaling 50.0x 不足 | T+786.717s | 600s+ | 50.0x |
+
+---
+
+## 关键发现与分析
+
+### 问题的本质
+1. **Bazel 的 git_repository 规则无法有效处理 boost 库**
+   - boost 仓库包含大量子模块
+   - git 子模块初始化本质上很慢（600+ 秒）
+   - 无论如何增加超时，都无法根本解决
+
+2. **简单增加超时数字无效**
+   - 从 600s → 1200s → 5.0x → 50.0x 都失败了
+   - 问题不是超时的秒数，而是 Bazel 处理 git 的方式本身
+
+3. **与架构相关**
+   - ARM64 构建速度略慢，但这不是主要原因
+   - 主要原因是 boost 库的递归子模块初始化
+
+### 根本原因
+Bazel 的 `new_git_repository` 规则依赖于：
+```python
+new_git_repository(
+    name = "org_boost",
+    init_submodules = True,           # 初始化子模块
+    recursive_init_submodules = True, # 递归初始化所有子模块
+    ...
+)
 ```
 
-**方案 C: 使用 http_archive 而不是 git_repository**
+这个设计在处理大型仓库时非常低效：
+- 每个子模块的初始化都需要网络请求
+- 递归初始化导致级联的 git 操作
+- 单一 git 命令可能需要 10+ 分钟
+
+---
+
+## 推荐解决方案（优先级排序）
+
+### 🥇 方案 A: 使用系统 boost 包（最简单、推荐）
+```dockerfile
+RUN apt-get update && apt-get install -y \
+    libboost-all-dev \
+    libboost-dev libboost-system-dev libboost-filesystem-dev
+```
+
+**优点:**
+- 完全避免 git 下载和编译
+- 节省 20+ 分钟编译时间
+- Ubuntu 预编译，性能最佳
+- 对 ARM64 的支持很好
+
+**缺点:**
+- 需要修改 third_party/boost/BUILD 文件以使用系统 boost
+- boost 版本可能与预期的 1.75.0 不同
+
+**预期编译时间:** 20-30 分钟（节省 50% 时间）
+
+---
+
+### 🥈 方案 B: 使用 http_archive 替代 git_repository（清晰）
 ```python
 # 在 workspace.bzl 中替换：
 http_archive(
     name = "org_boost",
     url = "https://github.com/boostorg/boost/archive/refs/tags/boost-1.75.0.tar.gz",
-    # 无需子模块初始化，更快更稳定
+    sha256 = "...",
+    strip_prefix = "boost-boost-1.75.0",
+    # 无需子模块初始化
 )
 ```
 
-**方案 D: 使用官方的 TensorFlow Boost 规则**
-- TensorFlow 可能已经有内置的 boost 依赖管理
-- 检查是否可以重用 TensorFlow 的 boost 配置
+**优点:**
+- 直接下载 tar.gz，避免 git 子模块问题
+- 版本控制明确
+- 更快更稳定
+- 无需修改 Dockerfile
 
-**立即建议:**
-采用 **方案 A**（系统 boost 包）是最快的解决方案：
-1. 在 Dockerfile 中添加：`apt-get install -y libboost-all-dev`
-2. 修改 third_party/boost/BUILD 文件以使用系统 boost
-3. 预期编译时间从 40+ 分钟降低到 10-15 分钟
+**缺点:**
+- 需要更新 WORKSPACE 文件
+- 下载大约 150MB 的 tar 文件
+
+**预期编译时间:** 35-40 分钟（仍需下载完整源码）
+
+---
+
+### 🥉 方案 C: 完全禁用 boost 初始化（高风险）
+```python
+new_git_repository(
+    name = "org_boost",
+    init_submodules = False,           # 禁用所有子模块
+    recursive_init_submodules = False,
+    ...
+)
+```
+
+**优点:**
+- 最快的 git 操作（仅 clone 主仓库）
+- 如果 boost 在没有子模块的情况下可用，会很快
+
+**缺点:**
+- boost 库可能缺少必要的子模块，导致编译失败
+- 高风险方案
+
+**预期编译时间:** 10-15 分钟（如果可行）
+
+---
+
+## 立即建议
+
+**强烈推荐采用方案 A（系统 boost）：**
+
+1. 修改 Dockerfile，在依赖安装部分添加：
+   ```dockerfile
+   libboost-all-dev \
+   ```
+
+2. 修改 third_party/boost/BUILD 文件，使用系统 boost
+
+3. 预期结果：编译时间从 45+ 分钟降低到 20-30 分钟
+
+这是最稳定、最快的解决方案。系统 boost 包已经过充分测试，完全可用。
+
+---
+
+## 编译时间线总结
+
+| 阶段 | 耗时 | 备注 |
+|------|------|------|
+| 依赖安装 | ~150s | 一次性 |
+| 源码下载 | ~20s | Docker COPY 只需 1s |
+| Bazel 分析阶段 | ~200s | 包括 TensorFlow 等依赖下载 |
+| **boost git 操作** | **~600s** | 🔴 **瓶颈！** |
+| Bazel 编译 | ~30-60 分钟 | 取决于优化级别和 ARM64 速度 |
+
+**采用方案 A 后：**
+- boost git 操作（~600s）→ apt 包（~5s）
+- **总节省时间：~10 分钟**
+
+
 
 
 
