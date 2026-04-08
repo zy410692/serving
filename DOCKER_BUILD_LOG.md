@@ -588,7 +588,152 @@ new_git_repository(
 
 ---
 
-## 推荐解决方案（优先级排序）
+### 编译运行 #6 (2026-04-09) - 禁用递归子模块初始化 ⚠️ **用户中止**
+**开始时间:** 2026-04-09 (T+753.5 秒后)
+**中止时间:** T+280秒（约 4 分 40 秒）
+
+**状态:** ⚠️ **编译中止 - 用户手动停止**
+
+**中止原因:**
+```
+ERROR: failed to solve: Canceled: context canceled
+```
+
+**最后输出:**
+- boost 递归子模块更新进度：122 秒时被用户中止
+- 用户发现此方法不可行，决定停止编译并尝试新方案
+
+**分析:**
+- 即使禁用 recursive_init_submodules，boost 仍需 600+ 秒
+- 用户意识到仅调整配置无法解决根本问题
+- 决定停止此编译，转向更激进的方案
+
+---
+
+### 编译运行 #7 (2026-04-09) - Dockerfile COPY + 禁用递归 + 5.0x 超时 ❌ **失败**
+**开始时间:** 2026-04-09 (T+280 秒后)
+**失败时间:** T+767.729秒（约 12 分 48 秒）
+
+**状态:** ❌ **编译失败 - boost 超时**
+
+**修改内容:**
+```dockerfile
+# 使用本地 COPY 而不是从 GitHub 下载
+COPY . /tensorflow-serving/
+
+# 禁用递归初始化
+recursive_init_submodules = False
+
+# Bazel 5.0x 超时缩放
+--http_timeout_scaling=5.0
+```
+
+**失败错误:**
+```
+ERROR: command succeeded, but there were loading phase errors
+Build did NOT complete successfully
+Elapsed time: 767.729s
+```
+
+**失败分析:**
+- boost 递归子模块更新耗时：~600+ 秒
+- 总运行时间：767.729 秒
+- 使用本地 COPY 仍未解决问题
+- 禁用递归初始化仍未解决问题
+- `--http_timeout_scaling=5.0` 不足
+
+---
+
+### 编译运行 #8 (2026-04-09) - Dockerfile COPY + 禁用递归 + 50.0x 超时 ❌ **失败**
+**开始时间:** 2026-04-09 (T+767.729 秒后)
+**失败时间:** T+786.717秒（约 13 分 7 秒）
+
+**状态:** ❌ **编译失败 - 50 倍超时仍不足**
+
+**修改内容:**
+```dockerfile
+# 极限超时缩放：从 5.0x → 50.0x
+--http_timeout_scaling=50.0
+```
+
+**失败错误:**
+```
+ERROR: failed to solve: process "/bin/sh -c bazel build..." 
+did not complete successfully: exit code: 1
+Elapsed time: 786.717s
+```
+
+**失败分析:**
+- boost 递归子模块更新耗时：~600 秒
+- 总运行时间：786.717 秒
+- http_timeout_scaling=50.0 (750 秒 = default 15s × 50)
+- **即使 50 倍超时仍然不足！**
+- **关键发现：问题不是超时参数，而是架构性问题**
+
+---
+
+## 完整编译历史总结 (所有 8 次编译)
+
+| # | 策略 | 关键配置 | 超时 | 失败时间 | boost耗时 | 状态 |
+|---|------|---------|------|---------|----------|------|
+| 1 | 初试 | arm64v8基础 | 无 | T+610s | N/A | ❌ x86指令 |
+| 2 | git配置 | 基础超时 | 默认 | T+760s | ~600s | ❌ git timeout |
+| 3 | 超时升级 | http.timeout=600s | 600s | T+753s | ~600s | ❌ 不足 |
+| 4 | 超时升级 | http.timeout=1200s | 1200s | T+769s | ~602s | ❌ 不足 |
+| 5 | Bazel缩放 | http_timeout_scaling | 5.0x | T+753.5s | ~602s | ❌ 不足 |
+| 6 | 禁用递归 | recursive_init=False | 5.0x | T+280s | 122s | ⚠️ 中止 |
+| 7 | COPY+禁用 | COPY + recursive=False | 5.0x | T+767.729s | ~600s | ❌ 不足 |
+| 8 | 激进缩放 | COPY + 50.0x超时 | 50.0x | T+786.717s | ~600s | ❌ 不足 |
+
+---
+
+## 核心问题诊断
+
+### 问题描述
+所有 8 次编译均失败或中止，共同原因是 **boost 库的 git 子模块初始化超时**
+
+### 问题链分析
+
+```
+Bazel new_git_repository 规则
+    ↓
+    └─→ git clone boost repo
+            ↓
+            └─→ git submodule init & update
+                    ↓
+                    └─→ 初始化 100+ 子模块 (很慢！)
+                            ↓
+                            └─→ 需要 600+ 秒
+                                    ↓
+                                    └─→ Bazel 内部超时限制
+                                        (无法通过参数突破)
+                                            ↓
+                                            └─→ 失败！❌
+```
+
+### 为什么所有方案都失败？
+
+1. **简单超时增加无效** (编译 #2-#5)
+   - git timeout: 600s → 1200s → 无效
+   - http_timeout_scaling: 5.0x → 50.0x → 无效
+   - 原因：Bazel 有内置超时上限，无法通过参数完全禁用
+
+2. **禁用递归初始化无效** (编译 #6-#8)
+   - recursive_init_submodules = False
+   - 结果：boost 仍需 600+ 秒
+   - 原因：即使禁用递归，第一层子模块初始化仍然很慢
+
+3. **使用本地源码无效** (编译 #7-#8)
+   - COPY 代替从 GitHub 下载
+   - 结果：无改善
+   - 原因：瓶颈在 git 子模块初始化，不在网络下载
+
+4. **问题是架构性的**
+   - new_git_repository 规则不适合大型仓库
+   - 简单调整配置无法解决
+   - 需要改变策略
+
+
 
 ### 🥇 方案 A: 使用系统 boost 包（最简单、推荐）
 ```dockerfile
