@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_response.filePath // .tool_input.file_path' | { read -r f; if [[ \"$f\" == *.md ]]; then cd /workspace/serving && git add \"$f\" 2>/dev/null && git commit -m \"Auto-commit: Update $(basename \"$f\")\" 2>/dev/null || true; fi; }",
+            "statusMessage": "Auto-committing markdown changes..."
+          }
+        ]
+      }
+    ]
+  }
+}
