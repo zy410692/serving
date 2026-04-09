@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
+        libboost-all-dev \
         libcurl3-dev \
         libfreetype6-dev \
         libpng-dev \
@@ -86,6 +87,31 @@ RUN mkdir /bazel && \
     cd / && \
     rm -rf /bazel
 
+# Create GCC wrapper to filter out unsupported ARM64 flags (-mavx, -msse4.2)
+RUN echo '#!/bin/bash' > /usr/local/bin/gcc-wrapper.sh && \
+    echo 'args=()' >> /usr/local/bin/gcc-wrapper.sh && \
+    echo 'for arg in "$@"; do' >> /usr/local/bin/gcc-wrapper.sh && \
+    echo '  case "$arg" in' >> /usr/local/bin/gcc-wrapper.sh && \
+    echo '    -mavx|-msse4.2|-Qunused-arguments) ;;' >> /usr/local/bin/gcc-wrapper.sh && \
+    echo '    *) args+=("$arg") ;;' >> /usr/local/bin/gcc-wrapper.sh && \
+    echo '  esac' >> /usr/local/bin/gcc-wrapper.sh && \
+    echo 'done' >> /usr/local/bin/gcc-wrapper.sh && \
+    echo 'exec /usr/bin/gcc.real "${args[@]}"' >> /usr/local/bin/gcc-wrapper.sh && \
+    chmod +x /usr/local/bin/gcc-wrapper.sh
+
+# Also create g++ wrapper
+RUN cp /usr/bin/g++ /usr/bin/g++.real && \
+    echo '#!/bin/bash' > /usr/local/bin/g++-wrapper.sh && \
+    echo 'args=()' >> /usr/local/bin/g++-wrapper.sh && \
+    echo 'for arg in "$@"; do' >> /usr/local/bin/g++-wrapper.sh && \
+    echo '  case "$arg" in' >> /usr/local/bin/g++-wrapper.sh && \
+    echo '    -mavx|-msse4.2|-Qunused-arguments) ;;' >> /usr/local/bin/g++-wrapper.sh && \
+    echo '    *) args+=("$arg") ;;' >> /usr/local/bin/g++-wrapper.sh && \
+    echo '  esac' >> /usr/local/bin/g++-wrapper.sh && \
+    echo 'done' >> /usr/local/bin/g++-wrapper.sh && \
+    echo 'exec /usr/bin/g++.real "${args[@]}"' >> /usr/local/bin/g++-wrapper.sh && \
+    chmod +x /usr/local/bin/g++-wrapper.sh
+
 # Copy local TF Serving sources (with workspace.bzl optimization for ARM64)
 COPY . /tensorflow-serving/
 WORKDIR /tensorflow-serving
@@ -94,8 +120,14 @@ FROM base_build as binary_build
 # Build, and install TensorFlow Serving
 ARG TF_SERVING_BUILD_OPTIONS="--config=release"
 RUN echo "Building with build options: ${TF_SERVING_BUILD_OPTIONS}"
-ARG TF_SERVING_BAZEL_OPTIONS="--cpu=aarch64 --copt=-Qunused-arguments --cxxopt=-Qunused-arguments"
+ARG TF_SERVING_BAZEL_OPTIONS="--cpu=aarch64 --copt=-march=armv8-a"
 RUN echo "Building with Bazel options: ${TF_SERVING_BAZEL_OPTIONS}"
+
+# Use GCC wrapper to filter unsupported ARM64 flags
+RUN mv /usr/bin/gcc /usr/bin/gcc.real && \
+    mv /usr/bin/g++ /usr/bin/g++.real && \
+    ln -s /usr/local/bin/gcc-wrapper.sh /usr/bin/gcc && \
+    ln -s /usr/local/bin/g++-wrapper.sh /usr/bin/g++
 
 # Clear Bazel cache to avoid stale state and increase Bazel's fetch timeout
 RUN rm -rf /root/.cache/bazel && \

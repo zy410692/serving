@@ -138,11 +138,11 @@ def tf_serving_workspace():
 
     # The Boost repo is organized into git sub-modules (see the list at
     # https://github.com/boostorg/boost/tree/master/libs), which requires "new_git_repository".
-    new_git_repository(
+    # CHANGED: Using http_archive instead of new_git_repository to avoid 600+ second git submodule timeout
+    http_archive(
         name = "org_boost",
-        commit = "b7b1371294b4bdfc8d85e49236ebced114bc1d8f",  # boost-1.75.0
+        url = "https://github.com/boostorg/boost/archive/refs/tags/boost-1.75.0.tar.gz",
+        sha256 = "fc46538e67ccf880ab1823c99f4d19cdbaa9d974dcbcda226c7e608d11903e14",
+        strip_prefix = "boost-boost-1.75.0",
         build_file = "//third_party/boost:BUILD",
-        init_submodules = True,
-        recursive_init_submodules = False,  # Disabled to avoid 600+ second timeout during ARM64 builds
-        remote = "https://github.com/boostorg/boost",
     )
